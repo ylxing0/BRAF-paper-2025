@@ -1,0 +1,927 @@
+---
+title: "Lulu_RNAseq_Project2_Part1"
+author: "Zhi-Ping Feng, the ANU Bioinformatics Consultancy"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: 
+      toc_collapsed: FALSE
+    toc_depth: 4
+    theme: lumen
+editor_options: 
+chunk_output_type: console
+
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## R Markdown
+
+# 1. Setup libraries
+```{r loadlibraries}
+#if (!require("BiocManager", quietly = TRUE))
+#  install.packages("BiocManager")
+
+#BiocManager::install(c("ensembldb"EnsDb.Hsapiens.v86"))
+
+suppressMessages(library(gplots))
+suppressMessages(library(RColorBrewer))
+suppressMessages(library(dplyr))
+suppressMessages(library(edgeR))
+suppressMessages(library(limma))
+suppressMessages(library(Glimma))
+suppressMessages(library(tidyverse))
+suppressMessages(library(ensembldb))
+suppressMessages(library(EnsDb.Hsapiens.v86))
+
+suppressMessages(library(EnhancedVolcano))
+suppressMessages(library(ggpubr))
+suppressMessages(library(gridExtra))
+suppressMessages(library(grid))
+suppressMessages(library(RColorBrewer))
+
+```
+
+# 2. Read and format data
+
+```{r input_data}
+getwd() 
+#"/Users/zhipingfeng/Documents/Projects/lulu_stanford_Pro1/Lulu_Pro2/LuluProject2_DeSeq2"
+Levy_dataset <- read.csv("../lulu's data/Lulu.RNAseq.count.matrix.csv")
+Stanford_dataset <-read.csv ("../../Stanform1_dataCountMatrix.csv")
+
+
+new_DF <- merge(Levy_dataset, Stanford_dataset)
+str(new_DF) 
+new_DF <-new_DF[,c(1,31,32,33,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,
+                   21,22,23,24,25,26,27,28,29,30,34,35,36,37,38,39)]
+head(new_DF[,1:6])
+colnames(new_DF)
+dim(new_DF) ##32071    39
+write.csv(new_DF,file="Levy_Stanford_combined_count_matrix.csv")
+
+
+counts.inf<-new_DF[,1:4]
+head(counts.inf)
+counts<- new_DF[,28:39]
+head(counts)
+length(unique(counts.inf$HGNC)) #32023
+length(unique(counts.inf$Entrez)) # 32023
+length(unique(counts.inf$Ensembl)) # 32071
+
+rownames(counts)<-counts.inf$Ensembl
+
+
+ensembl.genes <- counts.inf$Ensembl
+geneIDs <- ensembldb::select(EnsDb.Hsapiens.v86, keys=ensembl.genes, keytype="GENEID",
+                             columns=c("SYMBOL","GENEID"))
+dupli=duplicated(geneIDs$SYMBOL)
+geneIDs.dup<-geneIDs[dupli,]
+geneIDs.dup # check what kind of gene isforms will be removed if the names of the counts  change to gene SYMBOL 
+# most of them SNO RNAs, U3 etc. So remove them should be ok
+geneIDs=geneIDs[!dupli,]
+
+
+length(unique(geneIDs$SYMBOL)) #32022
+
+ind=intersect(ensembl.genes, geneIDs$GENEID)
+df=counts[ind,]
+rownames(df)=geneIDs$SYMBOL
+head(df)
+```
+
+# 3. Quality check with diagnostic plots
+```{r QC, fig.width=12}
+sum.lib<-colSums(df)
+
+## barplot of library sizes
+par(mfrow=c(1,1),mar=c(6,14,3,1))
+barplot(sum.lib,las=1,cex.names=0.8,horiz=TRUE,col="steelblue",main="library sizes for differential gene expression analysis",las=2)
+grid()
+
+lCPM <- cpm(df,log=TRUE)
+conditions<-c("Pt9_Pre_DT", "Pt9_Post_DT","Cell_line_Pre_DT","Pt12_Post_DT",
+              "Cell_line_Post_DT","Pt12_Pre_DT","SU_DMSO","SU_DMSO","SU_DT24hr",
+              "SU_DT24hr","SU_DT48hr","SU_DT48hr")
+
+
+conditions <-as.factor(conditions)
+table(conditions)
+
+cols<-c("red4","red4",  "darkblue","red","darkblue","red",rep("green",2),
+              rep("darkgreen",2),rep("green4",2))
+
+
+## remove the lowly experseed genes that the measurements are within the noise level
+table(rowSums(counts)==0) 
+#FALSE  TRUE 
+#23300  8771 # 8771 genes with zero counts from all the 12 samples
+
+thresh <- lCPM >= 0 # at least  1 count per million 
+# This produces a logical matrix with TRUEs and FALSEs
+#head(thresh)
+
+# Summary of how many TRUEs there are in each row, which indicates how many genes with above 2 count per million
+colSums(thresh)
+
+keep <- rowSums(thresh) >= 2 # keep the genes with above 1 count per million in at least 2 samples
+summary(keep)  
+
+counts.keep <-df[keep,]
+lCPM.keep<-cpm(counts.keep,log=TRUE)
+dim(lCPM.keep) 
+
+geneIDs.keep<-geneIDs[keep,]
+## Multidimensional scaling plots
+par(mfrow=c(1,2),mar=c(6,8,3,1))
+plotMDS(lCPM,col=cols,main="MDS_plot of log2(CPM)")
+plotMDS(lCPM.keep,col=cols,main="MDS_plot of log2(CPM.keep)")
+
+## Density plots to check the count distribution before and after removal of lowly expressed genes
+par(mfrow=c(1,2),mar=c(5,5,3,1))
+
+plot(density(lCPM[,1]), col=cols[1], lwd=2, las=2, main="", xlab="")
+title(main="log2(CPM)_all_Genes", xlab="Log-cpm")
+abline(v=0, lty=3)
+for (i in 2:12){
+  den <- density(lCPM[,i])
+  lines(den$x, den$y, col=cols[i], lwd=2)
+}
+legend("topright", colnames(lCPM), text.col=cols, bty="n",cex=0.8)
+
+plot(density(lCPM.keep[,1]), col=cols[1], lwd=2, ylim=c(0,0.4), xlim=c(-7,15),las=2, main="", xlab="")
+title(main="log2(CPM)>0 in at least 2 samples", xlab="Log-cpm")
+abline(v=0, lty=3)
+for (i in 2:12){
+  den <- density(lCPM.keep[,i])
+  lines(den$x, den$y, col=cols[i], lwd=2)
+}
+legend("topright", colnames(lCPM), text.col=cols, bty="n",cex=0.8)
+
+## boxplot and RLE plot
+# function of RLE plot
+makeRLEplot<-function(M,main,ylim,cols,cex){
+  medians=apply(M,1,median)
+  newmatrix=M-medians
+  boxplot(newmatrix,main=main, col=cols, las=2,cex.name=cex,range=0,ylim=ylim,cex.axis=0.7)
+  abline(h=0,col="grey",lty=1)
+  #  medians
+}
+
+par(mfrow=c(1,2),mar=c(15,5,3,1))
+boxplot(lCPM.keep,col=cols,main="Boxplot of lCPM (counts.keep)",las=2,cex.axis=0.7)
+abline(h=median(lCPM.keep),col="grey")
+makeRLEplot(lCPM.keep,col=cols,main="RLE of logCPM (counts.keep)",ylim=c(-1,1),cex=0.7)
+
+write.csv(t(lCPM.keep),file="STN_10samples4PUREE.csv") # input online https://puree.genome.sg/ to estimate the tumor purity
+
+PUREE.res<-read.delim("PUREE_results_12STN_samples.txt")
+PUREE.res$SampleName<-rownames(t(lCPM.keep))
+PUREE.res$group<-y1$samples$group
+PUREE.res
+write.csv(PUREE.res,file="STN_12BulkRNAseq_samples_PUREE_result.csv") 
+
+```
+
+# 4. Prepare design matrix and run limma
+```{r limma, fig.width=12}
+
+samples<-data.frame(colnames(counts))
+#conditions<-c("Pre_DT", "Post_DT","Cell_line_Pre_DT","Post_DT",
+#"Cell_line_Post_DT","Pre_DT","SU_DMSO","SU_DMSO","SU_DT24hr",
+#"SU_DT24hr","SU_DT48hr","SU_DT48hr")
+
+
+class(conditions)
+samples$conditions<-conditions
+samples
+table(samples$conditions)
+
+
+design<-model.matrix(~ 0 + conditions)
+colnames(design)<-c("CL_Post_DT","CL_Pre_DT","Pt12_Post_DT","Pt12_Pre_DT","Pt9_Post_DT",
+                    "Pt9_Pre_DT","SU_DMSO","SU_DT24hr","SU_DT48hr")
+design
+
+y1 <- DGEList(counts.keep[,1:12],group=conditions)
+y1$samples
+
+y1 <- calcNormFactors(y1,method="TMM")
+y1$samples
+
+#v1 <- voom(y1,design,plot = TRUE)
+v1 <- voomWithQualityWeights(y1,design,plot = TRUE,col=cols)
+
+par(mfrow=c(1,2),mar=c(15,5,3,1))
+makeRLEplot(v1$E,col=cols,main="RLE after TMM",ylim=c(-1,1),cex=0.8)
+plotMDS(v1$E,col=cols,main=" MDS after TMM normalization")
+
+cont.matrix<-makeContrasts(CL_DT_Post2Pre=CL_Post_DT-CL_Pre_DT,
+                           Pt9_DT_Post2Pre=Pt9_Post_DT-Pt9_Pre_DT,
+                           Pt12_DT_Post2Pre=Pt12_Post_DT-Pt12_Pre_DT,
+                           SU_DT24hr_vs_SU_DMSO=SU_DT24hr-SU_DMSO,
+                           SU_DT48hr_vs_SU_DT24hr=SU_DT48hr-SU_DT24hr,
+                           SU_DT48hr_vs_SU_DMSO=SU_DT48hr-SU_DMSO,
+                           levels=design)
+cont.matrix
+fit1 <- lmFit(v1)
+fit1.cont <- contrasts.fit(fit1, cont.matrix)
+fit1.cont <- eBayes(fit1.cont)
+dim(fit1.cont) 
+
+summa.fit1 <- decideTests(fit1.cont,adjust.method = "BH")
+summary(summa.fit1) # number of DEGs (adj.pval<0.05)
+
+options(digits = 2)
+topTab<-vector(mode = "list",length=6)
+for (i in 1:length(colnames(cont.matrix))) { 
+topTab[[i]]<-topTable(fit1.cont,coef=i,sort.by="p",genelist=geneIDs.keep$SYMBOL,n=nrow(fit1))
+
+print(paste0("top20 DEGs  for ",colnames(cont.matrix)[i]," are: " ))
+print(head(topTab[[i]],n=20))
+write_csv(topTab[[i]],file=paste0("Limma_topTable_",colnames(cont.matrix)[i],".csv"))
+}
+```
+
+# 5. Presentations of differential expression analysis
+
+```{r DEA}
+# suppressMessages(library(ggpubr))
+vcplot<-vector(mode = "list",length=6)
+for (i in 1:6){ 
+  vcplot[[i]]<-EnhancedVolcano(topTab[[i]],x="logFC",y="P.Value",lab=topTab[[i]]$ID,title=colnames(cont.matrix)[i],FCcutoff=1,pCutoff=0.01)+
+  ggtitle(paste0("volcano plot of ",colnames(cont.matrix)[i]))
+
+}
+
+
+pp<-ggarrange(vcplot[[1]],vcplot[[2]],vcplot[[3]],vcplot[[4]],vcplot[[5]],vcplot[[6]],nrow=3,ncol=2,labels=LETTERS[1:6] )
+ggsave("6EnhancedVolcano_plots.pdf", pp,width=20,height=35)
+
+#library(RColorBrewer)
+nice.col <- brewer.pal(6,name="Set1")
+
+
+ng2display<-20
+
+
+for(i in 1:6) { 
+pdf(paste0("stripchart_top20DEGs_",colnames(cont.matrix)[i],".pdf"), width=20,height=20)
+par(mfrow=c(4,5),mar=c(15,5,2,1))
+
+  g.list<-topTab[[i]]$ID[1:ng2display]
+  for (j in 1:ng2display) { 
+    
+    stripchart(v1$E[rownames(v1$E)%in%g.list[j],]~samples$conditions,vertical=TRUE,las=2,cex.axis=1,pch=16,cex=1.3,col=nice.col,method="jitter",ylab="expression",main=g.list[j])
+  }
+  
+  dev.off()
+}
+```
+
+
+# 6.  Interactive volcano plot with DEGs highlighted
+```{r Glimma, eval=FALSE}
+#library(Glimma)
+nice.col <- brewer.pal(6,name="Dark2")
+
+for (i in 1:6) { 
+glXYPlot(x=fit1.cont$coefficients[,i], y=-log10(fit1.cont$p.value[,i]),
+         xlab="logFC", ylab="-log10(p.value)", main=paste0("Volcano plot  ",colnames(cont.matrix)[i]),
+         counts=v1$E, groups=conditions, status=summa.fit1[,i],
+         anno=geneIDs.keep, side.main="SYMBOL", folder=paste0("Lulu_combinedDataGlimmaInteractivePlots/volcano_",colnames(cont.matrix)[i]))
+}
+
+# Interactive MA plots with DEGs highlighted
+for (i in 1:6) { 
+glMDPlot(x=fit1.cont[,i], counts=v1$E, groups=conditions,
+         status=summa.fit1[,i],anno=geneIDs.keep, side.main="SYMBOL", main=colnames(cont.matrix)[i],
+         folder=paste0("Lulu_combinedDataGlimmaInteractivePlots/MA_",colnames(cont.matrix)[i]))
+}
+```
+
+# 7.  VennDiagram
+
+```{r VennDia, fig.width=12}
+summary(summa.fit1) 
+par(mfrow=c(1,2))
+a<-vennCounts(summa.fit1[,c(1:5)], include="both")
+vennDiagram(a, include="both", names=NULL, mar=rep(1,4), cex=c(1,1.2,1.2), lwd=1,
+            circle.col=c( "darkblue","red4","red","blue","darkgreen"),main="Number of DEGs (adj.P.val<0.05)", counts.col=c("blue","red"))
+
+
+vennDiagram(summa.fit1[,c(1:5)], include=c("up","down"), names=NULL, mar=rep(1,4), cex=c(1,1.2,1.2), lwd=1,main="Number of DEGs (adj.P.val<0.05)",
+            circle.col=c( "darkblue","red4","red","blue","darkgreen"), counts.col=c("red","blue"))
+
+a<-vennCounts(summa.fit1[,c(1:4,6)], include="both")
+vennDiagram(a, include="both", names=NULL, mar=rep(1,4), cex=c(1,1.2,1.2), lwd=1,
+            circle.col=c( "darkblue","red4","red","blue","darkgreen"),main="Number of DEGs (adj.P.val<0.05)", counts.col=c("blue","red"))
+
+
+vennDiagram(summa.fit1[,c(1:4,6)], include=c("up","down"), names=NULL, mar=rep(1,4), cex=c(1,1.2,1.2), lwd=1,main="Number of DEGs (adj.P.val<0.05)",
+            circle.col=c( "darkblue","red4","red","blue","darkgreen"), counts.col=c("red","blue"))
+
+
+
+out<-cbind(geneIDs.keep,summa.fit1)
+rownames(out)<-NULL
+
+write.csv(out,file="decisionTest_BHadjustPval0.05_6Comparisons.csv")
+```
+
+# 8. Example heatmaps
+```{r heatmap, fig.height=10}
+## Common DEGs among the comparisons and heatmap
+commonUp<-rownames(summa.fit1)[rowSums(summa.fit1[,c(1:4,6)])==5]
+str(commonUp) # 15 common up 
+
+commonDn<-rownames(summa.fit1)[rowSums(summa.fit1[,c(1:4,6)])==-5]
+str(commonDn) # 17 common up
+library(gplots)
+idx<-rownames(v1$E)%in%c(commonUp,commonDn)
+
+hclustfun=function(x) hclust(x, method="average")
+distfun=function(x) as.dist(1-cor(t(x)))
+heatmap.2(x=as.matrix(v1$E[idx,c(7:12)]),scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=geneIDs.keep$SYMBOL[idx],srtCol=30,main=paste0("common Up or Down DEGs"),
+          dendrogram="row",Colv=TRUE,
+          ColSideColors=cols[7:12], col=bluered(32),cexRow=0.8,cexCol=1,trace="none",las=2,margins=c(6,8),lhei=c(1,5))
+
+heatmap.2(x=as.matrix(v1$E[idx,c(1:6)]),scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=geneIDs.keep$SYMBOL[idx],srtCol=30,main=paste0("common Up or Down DEGs"),
+          dendrogram="row",Colv=TRUE,
+          ColSideColors=cols[1:6], col=bluered(32),cexRow=0.8,cexCol=1,trace="none",las=2,margins=c(6,8),lhei=c(1,5))
+
+save(geneIDs.keep,counts.keep, v1, design, cont.matrix,fit1.cont,topTab,file="Lulu_RNAseq_Project2_Part1.RData")
+```
+
+
+# 17/12/2023 heatmap
+```{r}
+
+
+hclustfun=function(x) hclust(x, method="average")
+distfun=function(x) as.dist(1-cor(t(x)))
+lulu.glist1<-c("SOX2","AQP4","GFAP","CLU","APOD","S100B","CSPG4",
+"PDGFRA","OLIG1","OLIG2","CLDN11","ASPA","CNP","NES","PROM1","CD4",
+"CD276","HLA-A","HLA-B","HLA-DRA","CIITA","STAT5A","GZMA","IFNGR1","CD274", "IFNGR2")
+
+lulu.glist2<-c("CD274","CNP","CLU","GFAP","OLIG1","OLIG2","AQP4","PROM1","PDCD1", "CD276", "CTLA4", "TIM3", "VISTA", "LAG3", "BTLA", "ICOS", "JAML", "4-1BB", "CD137", "GITR", "OX40", "CD28", "CD27", "HVEM")
+# "Fam171A1", "CD8" are not in the kept list
+
+lulu.glist<-unique(lulu.glist1,lulu.glist2)
+
+length(lulu.glist) #26
+length(lulu.glist2) #8
+
+idx<-rownames(v1$E)%in%lulu.glist
+table(idx)
+
+lcpm.mtx<-as.matrix(lCPM[,c(1,2,3,5,6,4,7:12)])
+rownames(lcpm.mtx)<-rownames(lCPM)
+colnames(lcpm.mtx)<-y1$samples$group[c(1,2,3,5,6,4,7:12)]
+lcpm.mtx[rownames(lcpm.mtx)%in%lulu.glist,c(3:6)]
+
+mtx<-as.matrix(v1$E[,c(1,2,3,5,6,4,7:12)])
+colnames(mtx)<-y1$samples$group[c(1,2,3,5,6,4,7:12)]
+
+lcpm.mtx[rownames(lcpm.mtx)%in%c("PDCD1","CD28"),]. #PDCD1 is not within the raw data
+
+Tregs<-c("EOMES","LAG3","IL10RA","CTLA4","GZMK","FOXP3","CCL22","CD28","PDCD1") # #PDCD1 (PD1) is not within the raw data
+
+T<-c("TCF7","CD69","ITGA1","ITGAE","CD7","TNF","TBX21","CD69","CD28","CD27","IFNG","CD44","CXCR6","GZMK","GZMB","PRF1","LCK","KLRG1","CTLA4","EOMES","LAG3","LGALS3","FAS","SOCS3","CD276","BTLA","CD274","HAVCR2","ICOS","JAML","TNFSF9","TNFRSF18","TNFRSF14","IL6R","IL6","CD8A","CD8B","FOXP3")
+
+t2<-c(T,lulu.glist)
+length(t2) #58-->60-->64
+g39<-rownames(lcpm.mtx[rownames(lcpm.mtx)%in%t2,c(3:6)]) #39-->40-->57
+
+#t2[!t2%in$rownames(lcpm.mtx)]
+# t2[!t2%in%rownames(lcpm.mtx)]
+# [1] "CD25"  "CCL3"  "CCL4"  "PDCD1"   "VISTA"   " # "TIM3" "4-1BB"("CD137") "GITR"  "OX40"  "HVEM" using different names
+
+
+rownames(lcpm.mtx[rownames(lcpm.mtx)%in%T,c(3:6)]) # in the log2(CPM) data
+
+T.order<-c("TCF7","CD69", "ITGAE","ITGA1" ,"CD7","TNF","TBX21", "IFNG" ,"CD44", "GZMK","GZMB","KLRG1",  "CD27","CXCR6", "CD28","PRF1", "LCK",  
+"CTLA4" ,"EOMES"  ,"LAG3",  "FAS", "LGALS3", "SOCS3" )
+
+# PDCD1,  VISTA, CD25 # CD276, CTLA4,  LAG3, BTLA, CD28, CD27 are already in, TIM3-->HAVCR2
+#    # ICOS,JAML, 4-1BB (CD137)-->TNFSF9 , GITR-->TNFRSF18, OX40-->TNFRSF4, HVEM-->TNFRSF14
+
+mtx[rownames(mtx)%in%Tregs,c(3:6)] # in the keep list for differential expression analysis, TMM normalization
+
+lcpm.mtx[rownames(lcpm.mtx)%in%t2,c(3:6)] # in the log2(CPM) data
+dim(lcpm.mtx[rownames(lcpm.mtx)%in%t2,c(3:6)] ) #39  4. -->61x4
+idx.lcpm<-rownames(lcpm.mtx)%in%t2
+table(idx.lcpm) 
+mtx[rownames(mtx)%in%T,c(3:6)] # in the keep list for differential expression analysis
+length(t2)
+
+t2.pink<-c("CLU","GFAP","OLIG1","OLIG2","AQP4","PROM1","CNP","ASPA", "S100B","NES","SOCS2","CLDN11","APOD","CSPG4","PDGFRA","ASCL1", "HES6", "EGFR", "DLL1", "MBP")
+lcpm.mtx[rownames(lcpm.mtx)%in%t2.pink,c(3:6)] 
+t2.pink[!t2.pink%in%rownames(lcpm.mtx)] 
+idx.lcpm<-rownames(lcpm.mtx)%in%t2.pink
+table(idx.lcpm) 
+
+pdf("Heatpmap_lulu20PinkGenes_v0.pdf",height=8,width=4)
+heatmap.2(x=lcpm.mtx[idx.lcpm,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=rownames(lcpm.mtx)[idx.lcpm],srtCol=30,main=paste0(""),
+          dendrogram="row",Colv=FALSE,density.info="none",key.title ="",
+
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1,cexCol=1.0,trace="none",las=2,margins=c(8,8),lhei=c(0.7,4))
+dev.off()
+
+t2.green<-c("EOMES","LAG3","HAVCR2","FAS","CD276","BTLA","SOCS3","CD274","CTLA4","LGALS3")
+lcpm.mtx[rownames(lcpm.mtx)%in%t2.green,c(3:6)] 
+t2.green[!t2.green%in%rownames(lcpm.mtx)] 
+idx.lcpm<-rownames(lcpm.mtx)%in%t2.green
+table(idx.lcpm) 
+pdf("Heatpmap_lulu10GreenGenes_v0.pdf",height=8,width=4)
+heatmap.2(x=lcpm.mtx[idx.lcpm,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=rownames(lcpm.mtx)[idx.lcpm],srtCol=30,main=paste0(""),
+          dendrogram="row",Colv=FALSE,density.info="none",key.title ="",
+
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1,cexCol=1.2,trace="none",las=2,margins=c(8,8),lhei=c(0.7,4))
+dev.off()
+
+t2.blue<-c("TBX21","ITGA1","CD27","TNFSF14","CD28","CXCR6","CD7","CD69","GZMA","GZMK","PRF1","JAML","KLRG1","STAT5A","TNFSF18","TCF7","ICOS","TNF","IFNGR2","CD44","LCK","TNFSF9",
+           "ITGAE","GZMB","IFNG")
+lcpm.mtx[rownames(lcpm.mtx)%in%t2.blue,c(3:6)] 
+t2.blue[!t2.blue%in%rownames(lcpm.mtx)] 
+idx.lcpm<-rownames(lcpm.mtx)%in%t2.blue
+table(idx.lcpm) 
+pdf("Heatpmap_lulu25BlueGenes_v0.pdf",height=8,width=4)
+heatmap.2(x=lcpm.mtx[idx.lcpm,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=rownames(lcpm.mtx)[idx.lcpm],srtCol=30,main=paste0(""),
+          dendrogram="row",Colv=FALSE,density.info="none",key.title ="",
+
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1,cexCol=1.2,trace="none",las=2,margins=c(8,8),lhei=c(0.7,4))
+dev.off()
+
+t2.orange<-c("IFNGR1","IFNGR2","HLA-DRA","HLA-A","HLA-B","CIITA")
+lcpm.mtx[rownames(lcpm.mtx)%in%t2.orange,c(3:6)] 
+t2.blue[!t2.orange%in%rownames(lcpm.mtx)] 
+idx.lcpm<-rownames(lcpm.mtx)%in%t2.orange
+table(idx.lcpm) 
+pdf("Heatpmap_lulu_6OrangeGenes_v0.pdf",height=8,width=4)
+heatmap.2(x=lcpm.mtx[idx.lcpm,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=rownames(lcpm.mtx)[idx.lcpm],srtCol=30,main=paste0(""),
+          dendrogram="row",Colv=FALSE,density.info="none",key.title ="",
+
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.2,cexCol=1.2,trace="none",las=2,margins=c(8,8),lhei=c(0.7,4))
+dev.off()
+
+
+t2.black<-c("CD8B","IL6R","CD4","CD8A","FOXP3","IL6","IL1B", "LIF", "LIFR", "FGF2", "CNTF", "CNTFR", "CCL2", "CXCL10", "SOCS3")
+lcpm.mtx[rownames(lcpm.mtx)%in%t2.black,c(3:6)] 
+t2.black[!t2.black%in%rownames(lcpm.mtx)] 
+idx.lcpm<-rownames(lcpm.mtx)%in%t2.black
+table(idx.lcpm) 
+pdf("Heatpmap_lulu_15BlackGenes_v0.pdf",height=8,width=4)
+heatmap.2(x=lcpm.mtx[idx.lcpm,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=rownames(lcpm.mtx)[idx.lcpm],srtCol=30,main=paste0(""),
+          dendrogram="row",Colv=FALSE,density.info="none",key.title ="",
+
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.2,cexCol=1.5,trace="none",las=2,margins=c(8,8),lhei=c(0.7,4))
+dev.off()
+
+IFNg_genes3 <- toupper(c("Ido1","Cxcl9","Cxcl10","Cxcl11","HLA-DRA","Stat1","Ifng","Ccr5","Prf1","Gzma"))
+#"H2-Ea"<-"HLA-DRA"
+lcpm.mtx[rownames(lcpm.mtx)%in%IFNg_genes3,c(3:6)] 
+IFNg_genes3[!IFNg_genes3%in%rownames(lcpm.mtx)] 
+idx.lcpm<-rownames(lcpm.mtx)%in%IFNg_genes3
+table(idx.lcpm) 
+pdf("Heatpmap_lulu_IFNg_genes3_v0.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[idx.lcpm,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=rownames(lcpm.mtx)[idx.lcpm],srtCol=30,main=paste0(""),
+          dendrogram="row",Colv=FALSE,density.info="none",key.title ="",
+
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.2,cexCol=1.5,trace="none",las=2,margins=c(8,8),lhei=c(1,4))
+dev.off()
+
+Expanded_immune_sig <- toupper(c("Cd3d","Ido1","Ciita","Cd3e","CCR3","Ccl5","Gzmk","Cd2","HLA-DRB1","Cxcl13","Il2rg","Nkg7","HLA-E","Cxcr6","Lag3","Tagap","Cxcl10","Stat1","Gzmb",rownames(lcpm.mtx)[grep("CCL",rownames(lcpm.mtx))]))
+# H2-EB2 -->HLA-DRB1
+# H2-QA1-->H2-T23-->HLA-E
+# https://www.informatics.jax.org/downloads/reports/HOM_MouseHumanSequence.rpt
+
+lcpm.mtx[rownames(lcpm.mtx)%in%Expanded_immune_sig,c(3:6)] 
+Expanded_immune_sig[!Expanded_immune_sig%in%rownames(lcpm.mtx)] 
+idx.lcpm<-rownames(lcpm.mtx)%in%Expanded_immune_sig
+table(idx.lcpm) 
+pdf("Heatpmap_lulu_Expanded_immune_sig_v0.pdf",height=8,width=4)
+heatmap.2(x=lcpm.mtx[idx.lcpm,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=rownames(lcpm.mtx)[idx.lcpm],srtCol=30,main=paste0(""),
+          dendrogram="row",Colv=FALSE,density.info="none",key.title ="",
+
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1,cexCol=1.2,trace="none",las=2,margins=c(8,8),lhei=c(0.8,4))
+dev.off()
+
+
+
+lulu.o<-c("ASCL1", "HES6", "EGFR", "DLL1", "PROM1", "NES", "GFAP", "AQP4", "CLU", "PDGFRA", "CSPG4", "CLDN11", "ASPA", "CNP", "MBP", "PLP1")
+lcpm.mtx[rownames(lcpm.mtx)%in%IFNg_genes3,c(3:6)] 
+IFNg_genes3[!IFNg_genes3%in%rownames(lcpm.mtx)] 
+idx.lcpm<-rownames(lcpm.mtx)%in%IFNg_genes3
+table(idx.lcpm) 
+pdf("Heatpmap_lulu_IFNg_genes3_v0.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[idx.lcpm,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=rownames(lcpm.mtx)[idx.lcpm],srtCol=30,main=paste0(""),
+          dendrogram="row",Colv=FALSE,density.info="none",key.title ="",
+
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.2,cexCol=1.5,trace="none",las=2,margins=c(8,8),lhei=c(1,4))
+dev.off()
+
+
+
+lcpm.mtx[rownames(lcpm.mtx)%in%IFNg_genes3,c(3:6)] 
+lulu.o[!lulu.o%in%rownames(lcpm.mtx)]
+
+idx.lcpm<-rownames(lcpm.mtx)%in%lulu.o
+table(idx.lcpm) 
+pdf("Heatpmap_lulu_orderGenes.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[lulu.o,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=lulu.o,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.0,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+pdf("Heatpmap_lulu_orderGenes_Pt12only_NoScaleRow.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[lulu.o,c(5:6)],scale="none",hclustfun=hclustfun,distfun=distfun,  labRow=lulu.o,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(7:8)], col=bluered(32),cexRow=1.0,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+##################################################################
+DnELISAgenes <-toupper(c("Tnfrsf21","Met","Il11","Il6","Cxcl8","Mmp1","Mmp3","Tnfrsf1b","Angptl4","Ccl2","Cxcl1",              "Cxcl16","Ecm1","Mmp2","Spp1","Ptx3","Tnfrsf1a","Plaur","Vegfc"))
+DnELISAgenes[!DnELISAgenes%in%rownames(lcpm.mtx)]
+#"MMP1A"-->"MMP1"
+
+idx.lcpm<-rownames(lcpm.mtx)%in%DnELISAgenes
+table(idx.lcpm) 
+pdf("Heatpmap_lulu_DnELISAgenes.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[DnELISAgenes,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=DnELISAgenes,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.0,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+
+
+ELISAgenes <- toupper(c("Lgals1","Lgals3","Lgals9","Calb1","Cycs","Mif","Timp4","Plau","Vegfa","IFNL1","WISP1"))
+ELISAgenes[!ELISAgenes%in%rownames(lcpm.mtx)]
+#"Il29"-->"IFNL1"
+#"Ccn4"-->"WISP1"
+idx.lcpm<-rownames(lcpm.mtx)%in%ELISAgenes
+table(idx.lcpm) 
+pdf("Heatpmap_lulu_ELISAgenes.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[ELISAgenes,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=ELISAgenes,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.0,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+IL_cytokines <- toupper(c("Il1b","Il1rn","Il4","Il5","Il6","Il9","Il6r","Il13","Il17a","Il17ra","Il22","Il23a","Il25","Il33","IL10", "IL2", "IL12A", "IL3","IL27", "IL4R",  "IFNL1"))
+IL_cytokines[!IL_cytokines%in%rownames(lcpm.mtx)]
+
+#"IL6RA"-->"IL6R"
+#"IL17"-->"IL17A"
+#"IL23"-->IL23A"
+#"IL4RA"-->"IL4R
+#"IL29"-->"IFNL1"
+idx.lcpm<-rownames(lcpm.mtx)%in%IL_cytokines
+table(idx.lcpm)
+
+pdf("Heatpmap_lulu_IL_cytokines_update2.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[IL_cytokines,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=IL_cytokines,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.0,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+
+Checkpoints_R <-toupper(c("Cd27","Cd28","Cd40","Tnfrsf4","Tnfrsf9","Tnfrsf18","Icos","Cd226","Adora2a","Btla","Ctla4","Lag3",
+                   "Havcr2","Tigit","Cd70"))
+
+Checkpoints_R[!Checkpoints_R%in%rownames(lcpm.mtx)]
+#"PDCD1"-->"PD-1",  "PD1" ,  "SLEB2"
+#"VSIR"-->"VISTA","B7H5","PD-1H",
+
+idx.lcpm<-rownames(lcpm.mtx)%in%Checkpoints_R
+table(idx.lcpm)
+
+pdf("Heatpmap_lulu_Checkpoints_R.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[Checkpoints_R,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=Checkpoints_R,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.0,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+
+Checkpoints_L <- toupper(c("Cd80","Cd86","Cd40lg","Tnfsf9","Tnfsf4","Icosl","Nectin2","Pvr","Lgals3","Cd274","Cd276","Pdcd1lg2",
+                   "Ceacam1","Lgals9"))
+Checkpoints_R[!Checkpoints_R%in%rownames(lcpm.mtx)]
+#"PDCD1"-->"PD-1",  "PD1" ,  "SLEB2"
+#"VSIR"-->"VISTA","B7H5","PD-1H",
+
+idx.lcpm<-rownames(lcpm.mtx)%in%Checkpoints_R
+table(idx.lcpm)
+
+pdf("Heatpmap_lulu_Checkpoints_R.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[Checkpoints_R,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=Checkpoints_R,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.0,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+Checkpoints_L <- toupper(c("Cd80","Cd86","Cd40lg","Tnfsf9","Tnfsf4","Icoslg","Nectin2","Pvr","Lgals3","Cd274","Cd276","Pdcd1lg2",
+                   "Ceacam1","Lgals9"))
+Checkpoints_L[!Checkpoints_L%in%rownames(lcpm.mtx)]
+#"ICOSL"-->"ICOSLG"
+
+idx.lcpm<-rownames(lcpm.mtx)%in%Checkpoints_L
+table(idx.lcpm)
+
+pdf("Heatpmap_lulu_Checkpoints_L.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[Checkpoints_L,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=Checkpoints_L,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.0,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+lulu_extraList1<-toupper(c("Ccl8","Col1a2","Icam1","Angptl4","Anxa1","Gdf15","Sema3c","APP",
+"Col1a1","CD209","IL4R","TIMP4","PLAU","IFNL1","WISP1", "IFNG","IGF1","NGF","APLN")) 
+
+lulu_extraList1<-toupper(c("Il23a","Il27","Il32","Ifng","Tgfb1","Lgals1","Lgals3","App")) 
+
+lulu_extraList1[!lulu_extraList1%in%rownames(lcpm.mtx)]
+#"IL4RA"-->"IL4R"
+#"UPA"-->"PLAU"
+#"IL-29" -->"IFNL1"
+
+idx.lcpm<-rownames(lcpm.mtx)%in%lulu_extraList1
+table(idx.lcpm)
+
+pdf("Heatpmap_lulu_extraList1_update2.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[lulu_extraList1,c(5:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=lulu_extraList1,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=1.0,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+lulu_extraList2<-toupper(c("L1CAM", "CD200", "RBP4", "TNFSF11", "TNFRSF4", "CD70", "BDKRB2", "SLITRK1", "SLITRK2","SLITRK3","SLITRK4" ,"TGFB1","NGF" , "APLN", "NRG1","TNFRSF21","MET","IL11","IL6","CXCL8","MMP1","MMP3","TNFRSF1B","ANGPTL4","CCL2","CXCL1","CXCL16","ECM1","MMP2","SPP1","PTX3","TNFRSF1A","PLAUR","VEGFC")) 
+
+lulu_extraList2[!lulu_extraList2%in%rownames(lcpm.mtx)]
+#"RANKL"  -->TNFSF11    
+#"OX40"  -->TNFRSF4     
+#"APELIN"  ??   
+#"GPR"   -->rownames(lcpm.mtx)[grep("GPR",rownames(lcpm.mtx)) ]  will be  a separate figure
+#"PCDH"  -->rownames(lcpm.mtx)[grep("PCDH",rownames(lcpm.mtx)) ]  will be a separate figure 
+#"BRADYKININ" -->BDKRB2
+#"SLITRK"   -->SLITRK1,SLITRK2,SLITRK3,SLITRK4 
+#"DR6"    -->TNFRSF21   
+#"HGFR" -->MET     
+#"IL8" -->CXCL8       
+#"TNFR2" -->TNFRSF1B     
+#"OPN" -->SPP1       
+#"TNFR1" -->TNFRSF1A     
+#"UPAR"   -->PLAUR
+
+idx.lcpm<-rownames(lcpm.mtx)%in%lulu_extraList2
+table(idx.lcpm)
+
+pdf("2groups_extraList2_v2.pdf",height=6,width=3)
+heatmap.2(x=lcpm.mtx[lulu_extraList2,c(5:6)],scale="none",hclustfun=hclustfun,distfun=distfun,  labRow=lulu_extraList2,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(2,8)], col=bluered(32),cexRow=0.8,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+Flist4<-toupper(c("L1CAM", "CD200", "RBP4", "TNFSF11", "TNFRSF4", "CD70", "BDKRB2", "SLITRK1", "SLITRK2","SLITRK3","SLITRK4" ,"NGF" , "APLN") )
+
+Flist4[!Flist4%in%rownames(lcpm.mtx)]
+idx.lcpm<-rownames(lcpm.mtx)%in%Flist4
+table(idx.lcpm)
+
+pdf("Scatterplot_Fgenelist4.pdf", height=8, width=5)
+plot(x=lcpm.mtx[Flist4,5],y=lcpm.mtx[Flist4,6],xlab="Pt12_Pre_DT",ylab="Pt12_Post_DT",pch=18,xlim=c(-3,8),ylim=c(-4,8))
+abline(a=0,b=1,col="red")
+text(x=lcpm.mtx[Flist4,5],y=lcpm.mtx[Flist4,6]+0.4,labels=Flist4,cex=0.8)
+dev.off()
+
+
+Flist1<-c("ASCL1","HES6","EGFR","DLL1","PROM1","NES","GFAP","AQP4","CLU","CLDN11","ASPA","CNP","MBP","PLP1")
+Flist1[!Flist1%in%rownames(lcpm.mtx)]
+idx.lcpm<-rownames(lcpm.mtx)%in%Flist1
+table(idx.lcpm)
+
+pdf("Scatterplot_Fgenelist1.pdf", height=8, width=5)
+plot(x=lcpm.mtx[Flist1,5],y=lcpm.mtx[Flist1,6],xlab="Pt12_Pre_DT",ylab="Pt12_Post_DT",pch=18,xlim=c(-3,13),ylim=c(-4,13))
+abline(a=0,b=1,col="red")
+text(x=lcpm.mtx[Flist1,5],y=lcpm.mtx[Flist1,6]+0.4,labels=Flist1,cex=0.8)
+dev.off()
+
+
+pdf("2groups_heatmap_Flist1_v1.pdf",height=5.5,width=3)
+heatmap.2(x=lcpm.mtx[Flist1,c(5:6)],scale="none",hclustfun=hclustfun,distfun=distfun,  labRow=Flist1,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(2,8)], col=bluered(32),cexRow=1.2,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+Flist2<-c("CD274","CCL8","COL1A2","ICAM1","ANGPTL4","ANXA1","IL23A","IL27","IL32","LGALS3","APP")
+Flist2[!Flist2%in%rownames(lcpm.mtx)]
+idx.lcpm<-rownames(lcpm.mtx)%in%Flist2
+table(idx.lcpm)
+
+pdf("2groups_heatmap_Flist2_Z.pdf",height=5.5,width=3)
+heatmap.2(x=lcpm.mtx[Flist2,c(5:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=Flist2,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(2,8)], col=bluered(32),cexRow=1.2,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+pdf("Scatterplot_Fgenelist3.pdf", height=8, width=6)
+plot(x=lcpm.mtx[Flist2,5],y=lcpm.mtx[Flist2,6],xlab="Pt12_Pre_DT",ylab="Pt12_Post_DT",pch=18,xlim=c(-4,13),ylim=c(-4,13))
+abline(a=0,b=1,col="red")
+text(x=lcpm.mtx[Flist2,5],y=lcpm.mtx[Flist2,6]+0.4,labels=Flist2,cex=0.8)
+dev.off()
+
+lulu_extraList2.PCDH<-rownames(lcpm.mtx)[grep("PCDH",rownames(lcpm.mtx)) ]
+lulu_extraList2.PCDH[!lulu_extraList2.PCDH%in%rownames(lcpm.mtx)]
+idx.lcpm<-rownames(lcpm.mtx)%in%lulu_extraList2.PCDH
+table(idx.lcpm)
+
+D.PCDH<-lulu_extraList2.PCDH[abs(lcpm.mtx[lulu_extraList2.PCDH,5]-lcpm.mtx[lulu_extraList2.PCDH,6])>=2.5]
+pdf("Scatterplot_12PCDH.pdf", height=8, width=6)
+plot(x=lcpm.mtx[D.PCDH,5],y=lcpm.mtx[D.PCDH,6],xlab="Pt12_Pre_DT",ylab="Pt12_Post_DT",pch=18,xlim=c(-3,9),ylim=c(-3,9))
+abline(a=0,b=1,col="red")
+text(x=lcpm.mtx[D.PCDH,5],y=lcpm.mtx[D.PCDH,6]+0.4,labels=D.PCDH,cex=0.8)
+dev.off()
+
+pdf("Heatpmap_lulu_extraList2.PCDH.pdf",height=10,width=4)
+heatmap.2(x=lcpm.mtx[lulu_extraList2.PCDH,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=lulu_extraList2.PCDH,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=0.7,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(0.7,4))
+dev.off()
+
+
+lulu_extraList2.GPR<-rownames(lcpm.mtx)[grep("GPR",rownames(lcpm.mtx)) ] 
+lulu_extraList2.GPR[!lulu_extraList2.GPR%in%rownames(lcpm.mtx)]
+idx.lcpm<-rownames(lcpm.mtx)%in%lulu_extraList2.GPR
+table(idx.lcpm)
+
+glimmaXY(x=lcpm.mtx[lulu_extraList2.GPR,5],y=lcpm.mtx[lulu_extraList2.GPR,6],xlab="Pt12_Pre_DT",ylab="Pt12_Post_DT")
+
+D.GPR<-lulu_extraList2.GPR[abs(lcpm.mtx[lulu_extraList2.GPR,5]-lcpm.mtx[lulu_extraList2.GPR,6])>=2.5]
+pdf("Scatterplot_10GPR.pdf", height=8, width=6)
+plot(x=lcpm.mtx[D.GPR,5],y=lcpm.mtx[D.GPR,6],xlab="Pt12_Pre_DT",ylab="Pt12_Post_DT",pch=18,xlim=c(-6,10),ylim=c(-6,10))
+abline(a=0,b=1,col="red")
+text(x=lcpm.mtx[D.GPR,5],y=lcpm.mtx[D.GPR,6]+0.4,labels=D.GPR,cex=0.8)
+dev.off()
+
+pdf("Scatterplot_100GPR.pdf", height=8, width=6)
+plot(x=lcpm.mtx[lulu_extraList2.GPR,5],y=lcpm.mtx[lulu_extraList2.GPR,6],xlab="Pt12_Pre_DT",ylab="Pt12_Post_DT",pch=18,xlim=c(-6,10),ylim=c(-6,10))
+abline(a=0,b=1,col="red")
+text(x=lcpm.mtx[D.GPR,5],y=lcpm.mtx[D.GPR,6]+0.4,labels=D.GPR,cex=0.8)
+dev.off()
+
+
+
+pdf("Heatpmap_lulu_extraList2.GPR.pdf",height=10,width=4)
+heatmap.2(x=lcpm.mtx[lulu_extraList2.GPR,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=lulu_extraList2.GPR,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=0.6,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(0.7,4))
+dev.off()
+
+
+##############################################
+
+pdf("Heatpmap_lulu_orderGenes_Pt12only_NoScaleRow.pdf",height=6,width=4)
+heatmap.2(x=lcpm.mtx[lulu.o,c(5:6)],scale="none",hclustfun=hclustfun,distfun=distfun,  labRow=lulu.o,Rowv=FALSE,srtCol=30,main=paste0(""),
+          dendrogram="none",Colv=FALSE,density.info="none",key.title ="",
+          
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(7:8)], col=bluered(32),cexRow=1.0,cexCol=1.2,trace="none",las=2,margins=c(6,6),lhei=c(1,4))
+dev.off()
+
+# from kept_12samples_18206gene_lCPM under STN/STN_Pt9Pt12/STN.Pts_report_update2
+# Geneid	EntrezID	Length	Hopkins1.Pt9	Hopkins2.Pt9	NG1.Pt12	NG2.Pt12
+# PDCD1	5133	4194	-1.665111039	-1.779875789	-0.074431702	-0.690226927
+# VSIR	64115	4714	4.415816031	4.423067198	5.724678489	6.059444585
+# CCL3	6348	4379	-1.347342305	-1.845939663	-5.837483605	-5.837483605
+# CCL3L1	6349	6036	-4.32594058	-3.844244482	-3.441182497	-4.240162171
+# CCL4L2	9560	8261	-1.854792469	-0.696503145	-2.051561676	-5.837483605
+#	IL2RA	3559	3215	-1.371307482	-1.224085888	0.052032015	2.700601486 (CD25)
+
+
+ct<-read.csv("cytokine_related_GeneName4analysis.csv")
+length(ct$Gene.Name.for.analysis) #275
+nrow(lcpm.mtx[rownames(lcpm.mtx)%in%ct$Gene.Name.for.analysis,c(3:6)] ). #84
+idx2.lcpm<-rownames(lcpm.mtx)%in%ct$Gene.Name.for.analysis
+table(idx2.lcpm) 
+
+pdf("Heatpmap_lulu84CytokineRelatedGenes_v0.pdf",height=10,width=4)
+heatmap.2(x=lcpm.mtx[idx2.lcpm,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=rownames(lcpm.mtx)[idx2.lcpm],srtCol=30,main=paste0(""),
+          dendrogram="row",Colv=FALSE,density.info="none",key.title ="",
+
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=0.6,cexCol=1.0,trace="none",las=2,margins=c(8,8),lhei=c(0.7,4))
+dev.off()
+
+FNg_genes <- c("GBP6","FGL2","EIF2AK2","IL2RB","STAT4","IRF1","NMI","UBE2L6","DHX58","USP18",
+                "IFITM3","CASP1","PSMB9","NOD1","CIITA","SOD2","B2M","SRI","CXCL10","CXCL11",
+                "SECTM1","IL6","SOCS3","CD74","DDX60","IFIT3","TRIM25","TRIM14","STAT1",
+                "XAF1","MX1","OAS2","OAS3","SLC25A28","IFI35","IRF7","HLA-DQA1","RTP4","DDX58",
+                "APOL6","PARP14","ZNFX1","SERPING1","RSAD2","HELZ2","CMPK2","STAT2","IFIH1",
+                "TNFSF10","HERC6","C1R","HLA-DMA","C1S","HLA-A","HLA-B","IFI27","NFKBIA",
+                "GBP4","HLA-DRB1","PARP12","ISG15","BST2","EPSTI1","PIM1","LGALS3BP","SAMHD1",
+                "IFIT2")
+
+length(FNg_genes) #67 genes
+nrow(lcpm.mtx[rownames(lcpm.mtx)%in%c(FNg_genes,"C1RA","C1RB","EDS8","EDSPD1"),c(3:6)] ) #66
+FNg_genes[!FNg_genes%in%rownames(lcpm.mtx) ]# C1R
+idx2.lcpm<-rownames(lcpm.mtx)%in%FNg_genes
+table(idx2.lcpm) 
+
+pdf("Heatpmap_lulu_66FNg_genesv0.pdf",height=10,width=4)
+heatmap.2(x=lcpm.mtx[idx2.lcpm,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=rownames(lcpm.mtx)[idx2.lcpm],srtCol=30,main=paste0(""),
+          dendrogram="row",Colv=FALSE,density.info="none",key.title ="",
+
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9,10,7:8)], col=bluered(32),cexRow=0.6,cexCol=1.0,trace="none",las=2,margins=c(8,8),lhei=c(0.7,4))
+dev.off()
+
+
+g39.mtx<-lcpm.mtx[rownames(lcpm.mtx)%in%g39,c(3:6)]
+sub.samples<-samples[3:6,]
+con<-sub.samples$conditions
+
+pdf(paste0("stripchart_39Genes_Pt12.pdf"), width=20,height=40)
+par(mfrow=c(7,6),mar=c(15,5,2,1))
+
+  
+  for (j in 1:length(g39)) { 
+    
+    stripchart(g39.mtx[j,]~colnames(g39.mtx),vertical=TRUE,subset=c(1:4),las=2,cex.axis=1,pch=16,cex=1.3,col=nice.col,method="jitter",ylab="expression",main=g39[j])
+  }
+  
+  dev.off()
+
+
+
+
+
+rownames(v1$E)[idx] #15.  Rowv=FALSE
+idx<-rownames(v1$E)%in%t2
+
+heatmap.2(x=mtx[idx,c(3:6)],scale="row",hclustfun=hclustfun,distfun=distfun,  labRow=geneIDs.keep$SYMBOL[idx],srtCol=30,main=paste0(""),
+          dendrogram="row",Colv=FALSE,density.info="none",key.title ="",
+
+          ColSideColors=cols[c(1,2,3,5,4,6,7:12)][c(9:10,7:8)], col=bluered(32),cexRow=0.6,cexCol=1.5,trace="none",las=2,margins=c(8,8),lhei=c(1,4))
+
+names(topTab)<-colnames(cont.matrix)
+
+logFC.mtx1<-topTab[[1]][lulu.glist,1:2]
+logFC.mtx3<-topTab[[3]][lulu.glist,1:2]
+logFC.mtx6<-topTab[[6]][lulu.glist,1:2]
+
+identical(logFC.mtx1$ID,logFC.mtx3$ID)
+identical(logFC.mtx1$ID,logFC.mtx6$ID)
+
+logFC.mtx<-data.frame(CL_DT_Post_vs_Pre=topTab[[1]][lulu.glist,2],
+                      Pt12_DT_Post_vs_Pre=topTab[[3]][lulu.glist,'logFC'],
+                      SU_DT24hr_vs_DMSO=topTab[[4]][lulu.glist,'logFC'],
+                      SU_DT48hr_vs_DMSO=topTab[[6]][lulu.glist,'logFC'])
+
+dim(logFC.mtx)
+rownames(logFC.mtx)<-lulu.glist
+
+heatmap.2(x=as.matrix(logFC.mtx),scale="none",hclustfun=hclustfun,distfun=distfun,  labRow=,srtCol=30,main=paste0("logFC of Lulu gene_list"),
+          dendrogram="row",Colv=FALSE,
+           col=greenred(32),cexRow=0.8,cexCol=1,trace="none",las=2,margins=c(6,8),lhei=c(1,5))
+
+
+```
+
+# References
+
+1. Kim, D., Paggi, J.M., Park, C. et al. Graph-based genome alignment and genotyping with HISAT2 and HISAT-genotype. Nat Biotechnol 37, 907–915 (2019).
+
+2. Yang Liao, Gordon K. Smyth, Wei Shi, featureCounts: an efficient general purpose program for assigning sequence reads to genomic features, Bioinformatics, Volume 30, Issue 7, 1 April 2014, Pages 923–930, https://doi.org/10.1093/bioinformatics/btt656
+
+3. Gandolfo LC, Speed TP (2018) RLE plots: Visualizing unwanted variation in high dimensional data. PLOS ONE 13(2): e0191629 https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0191629
+
+
+4. Independent filtering increases detection power for high-throughput experiments
+Richard Bourgon, Robert Gentleman, Wolfgang Huber
+Proceedings of the National Academy of Sciences May 2010, 107 (21) 9546-9551; DOI: 10.1073/pnas.0914005107
+
+5. Ritchie, M. E., B. Phipson, D. Wu, Y. Hu, C. W. Law, W. Shi, and G. K. Smyth. 2015. “limma Powers Differential Expression Analyses for RNA-Sequencing and Microarray Studies.” Nucleic Acids Res 43 (7): e47.
+
+6. Robinson, M. D., D. J. McCarthy, and G. K. Smyth. 2010. “edgeR: A Bioconductor Package for Differential Expression Analysis of Digital Gene Expression Data.” Bioinformatics 26: 139–40.
+
+7. Blighe K, Rana S, Lewis M (2021). EnhancedVolcano: Publication-ready volcano plots with enhanced colouring and labeling. R package version 1.12.0, https://github.com/kevinblighe/EnhancedVolcano.
+
+8. Su S, Law CW, Ah-Cann C, Asselin-Labat M, Blewitt ME, Ritchie ME (2017). “Glimma: interactive graphics for gene expression analysis.” Bioinformatics, 33(13), 2050-2052.
+
+9. Zhi-Ping Feng, Francois Collin and Terence P. Speed. Combining Single and Paired End RNA-seq Data for Differential Expression Analyses in book: Statistical Analysis for High-Dimensional Data: The Abel Symposium 2014 (https://link.springer.com/chapter/10.1007%2F978-3-319-27099-9_8)
+
+
+# Session Information
+```{r}
+sessionInfo()
+```
